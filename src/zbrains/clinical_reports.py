@@ -191,52 +191,55 @@ def controls_summary_html(data, subject_age=None):
         
         # Get binary encoding dictionary if it exists
         binary_encoding = getattr(data, 'binary_encodings', {}).get(sex_col, None)
-        
-        # If sex is binary encoded (e.g., {'m':1, 'f':0}), handle appropriately
         is_binary_encoded = binary_encoding is not None
         
-        if is_binary_encoded:
-            # Create reverse mapping from codes to labels
-            sex_codes = {v: k.upper() for k, v in binary_encoding.items()}
-            male_code = binary_encoding.get('M', None)  # Default to None if not specified
-            female_code = binary_encoding.get('F', None)  # Default to None if not specified
-
-            # Count by binary codes
-            Fnumber = (df[sex_col] == female_code).sum()
-            Mnumber = (df[sex_col] == male_code).sum()
-        else:
-            # Assume traditional 'M'/'F' or similar strings
-            Fnumber = (df[sex_col] == 'F').sum()
-            Mnumber = (df[sex_col] == 'M').sum()
+        # Create a standardized dataframe for plotting
+        df_plot = df.copy()
         
-        mean_age = df[age_col].mean()
-        sd_age = df[age_col].std()
-        Ntotal = len(df)
+        if is_binary_encoded:
+            # Find the actual keys case-insensitively (e.g. if dict has 'Male': 1, 'Female': 0)
+            male_code = next((v for k, v in binary_encoding.items() if str(k).upper().startswith('M')), None)
+            female_code = next((v for k, v in binary_encoding.items() if str(k).upper().startswith('F')), None)
+            
+            Fnumber = (df_plot[sex_col] == female_code).sum()
+            Mnumber = (df_plot[sex_col] == male_code).sum()
+            
+            df_plot['sex_label'] = df_plot[sex_col].map({male_code: 'M', female_code: 'F'})
+        else:
+            # Robust mapping for strings (handles 'Male', 'Female', 'm', 'f', etc.)
+            sex_series = df_plot[sex_col].astype(str).str.upper().str.strip()
+            Fnumber = sex_series.str.startswith('F').sum()
+            Mnumber = sex_series.str.startswith('M').sum()
+            
+            # Fallback if numerical 0/1 were passed without encoding
+            if Fnumber == 0 and Mnumber == 0:
+                Fnumber = (sex_series == '0').sum()
+                Mnumber = (sex_series == '1').sum()
+                df_plot['sex_label'] = 'Unknown'
+                df_plot.loc[sex_series == '1', 'sex_label'] = 'M'
+                df_plot.loc[sex_series == '0', 'sex_label'] = 'F'
+            else:
+                df_plot['sex_label'] = 'Unknown'
+                df_plot.loc[sex_series.str.startswith('M'), 'sex_label'] = 'M'
+                df_plot.loc[sex_series.str.startswith('F'), 'sex_label'] = 'F'
+        
+        mean_age = df_plot[age_col].mean()
+        sd_age = df_plot[age_col].std()
+        Ntotal = len(df_plot)
         Fperc = 100 * Fnumber / Ntotal if Ntotal else 0
         Mperc = 100 * Mnumber / Ntotal if Ntotal else 0
 
         # Bin and count
-        bins = np.arange(df[age_col].min() // 5 * 5, df[age_col].max() // 5 * 5 + 10, 5)
+        bins = np.arange(df_plot[age_col].min() // 5 * 5, df_plot[age_col].max() // 5 * 5 + 10, 5)
         labels = [f"{int(b)}-{int(b + 4)}" for b in bins[:-1]]
-        df['age_bin'] = pd.cut(df[age_col], bins=bins, labels=labels, right=True, include_lowest=True)
+        df_plot['age_bin'] = pd.cut(df_plot[age_col], bins=bins, labels=labels, right=True, include_lowest=True)
         
-        # Add a text sex column for groupby if binary encoded
-        if is_binary_encoded:
-            df['sex_label'] = df[sex_col].map(sex_codes)
-            group_sex_col = 'sex_label'
-        else:
-            group_sex_col = sex_col
-            
-        age_bin_counts = df.groupby(['age_bin', group_sex_col]).size().unstack(fill_value=0)
+        age_bin_counts = df_plot.groupby(['age_bin', 'sex_label']).size().unstack(fill_value=0)
         
-        # Ensure both columns exist
+        # Ensure both columns exist for plotting standard keys
         m_column = 'M'
         f_column = 'F'
         
-        if is_binary_encoded:
-            m_column = sex_codes.get(male_code, 'M')
-            f_column = sex_codes.get(female_code, 'F')
-            
         for sex in [m_column, f_column]:
             if sex not in age_bin_counts.columns:
                 age_bin_counts[sex] = 0
@@ -352,6 +355,9 @@ def pipeline_info(tmp_dir="/tmp"):
     # Create a UUID-QR
     uuid_generated, qr_path = uuid_qr(tmp_dir, scale=5, border=0)
     
+    # Convert QR to base64
+    qr_src = _get_b64_src(qr_path)
+    
     # Table HTML with explicit width control (50%) and table-based layout
     info_table = f'''
     <table style="width:50%; font-family:gill sans, sans-serif;">
@@ -389,7 +395,7 @@ def pipeline_info(tmp_dir="/tmp"):
           </table>
         </td>
         <td style="vertical-align:top; width:30%;">
-          <img src="{qr_path}" alt="QR Code" style="width:150px; height:auto; border:1px solid #ccc;" />
+          <img src="{qr_src}" alt="QR Code" style="width:150px; height:auto; border:1px solid #ccc;" />
         </td>
       </tr>
     </table>
@@ -684,6 +690,14 @@ def convert_html_to_pdf(source_html, output_filename: PathType):
     # True on success and False on errors
     return pisa_status.err
 
+def _get_b64_src(path):
+    """Helper to convert file path to base64 src string"""
+    if not os.path.exists(path):
+        return ""
+    
+    with open(path, "rb") as f:
+        data = base64.b64encode(f.read()).decode('utf-8')
+    return f"data:image/png;base64,{data}"
 
 def report_header_template(
     *,
@@ -724,9 +738,12 @@ def report_header_template(
     ses_str = "" if ses is None else f" &nbsp; <b>Session</b>: {ses},"
 
     # Header
+    # Use base64 for banner
+    banner_src = _get_b64_src(f"{DATA_PATH}/zbrains_banner.png")
+    
     report_header = (
         # Banner
-        f'<img id="top" src="{DATA_PATH}/zbrains_banner.png" alt="zbrains">'
+        f'<img id="top" src="{banner_src}" alt="zbrains">'
         # Title
         f'<p style="{style.format(fontsize=20, extra="")}">'
         f"Clinical Summary &nbsp; | &nbsp; <b> {analysis.capitalize()} </b> "
@@ -813,14 +830,18 @@ def report_1x2_table(fig1: PathType, fig2: PathType, height=250):
         "padding-right:3px;text-align:center"
     )
 
+    # Convert to base64
+    src1 = _get_b64_src(fig1)
+    src2 = _get_b64_src(fig2)
+
     return (
         '<table style="border:1px solid white;width:100%">'
         "<tr>"
         f"<td style={style}>"
-        f'<img style="height:{height}px;margin-top:-100px;" src="{fig1}">'
+        f'<img style="height:{height}px;margin-top:-100px;" src="{src1}">'
         "</td>"
         f"<td style={style}>"
-        f'<img style="height:{height}px;margin-top:-100px;" src="{fig2}">'
+        f'<img style="height:{height}px;margin-top:-100px;" src="{src2}">'
         "</td>"
         "</tr>"
         "</table>"
@@ -972,7 +993,8 @@ def _load_surfaces_hip(
     res: Resolution = "high",
     subject_dir=None,
     participant_id=None,
-    session_id=None
+    session_id=None,
+    hippunfold_version=1
 ):
     """Load hippocampal surfaces - prioritize native subject surfaces if available"""
     
@@ -1025,8 +1047,15 @@ def _load_surfaces_hip(
                 mid_rh = read_surface(native_canonical_path_rh)
                 unf_rh = read_surface(native_unfold_path_rh)
                 
+                if hippunfold_version == 2:
+                    # mid_lh.Points = mid_lh.Points[:, [1, 0, 2]]
+                    unf_lh.Points = unf_lh.Points[:, [1, 0, 2]]
+                    # mid_rh.Points = mid_rh.Points[:, [1, 0, 2]]
+                    unf_rh.Points = unf_rh.Points[:, [1, 0, 2]]
+                    unf_lh.Points[:, 1] *= -1
+
                 # Flip right to left surface
-                mid_lh.Points[:, 0] *= -1
+                # mid_lh.Points[:, 0] *= -1
                 unf_lh.Points[:, 0] *= -1
 
                 # Rotate surfaces
@@ -1044,9 +1073,13 @@ def _load_surfaces_hip(
                 
                 # Create lateral views from canonical
                 lat_rh = read_surface(native_canonical_path_rh)
+                # if hippunfold_version == 2:
+                #     lat_rh.Points = lat_rh.Points[:, [1, 0, 2]]
                 lat_rh.Points = rot_y270.apply(lat_rh.Points)
                 
                 lat_lh = read_surface(native_canonical_path_lh)
+                # if hippunfold_version == 2:
+                #     lat_lh.Points = lat_lh.Points[:, [1, 0, 2]]
                 lat_lh.Points = rot_y90.apply(mid_lh.Points)
                 
                 return lat_lh, mid_lh, unf_lh, unf_rh, mid_rh, lat_rh
@@ -1063,6 +1096,10 @@ def _load_surfaces_hip(
                 mid_rh = read_surface(native_canonical_path_rh)
                 unf_rh = read_surface(native_unfold_path_rh)
                 
+                if hippunfold_version == 2:
+                    # mid_rh.Points = mid_rh.Points[:, [1, 0, 2]]
+                    unf_rh.Points = unf_rh.Points[:, [1, 0, 2]]
+
                 # Create left hemisphere by copying and mirroring right hemisphere
                 mid_lh = mid_rh.copy()
                 unf_lh = unf_rh.copy()
@@ -1101,11 +1138,17 @@ def _load_surfaces_hip(
                 mid_lh = read_surface(native_canonical_path_lh)
                 unf_lh = read_surface(native_unfold_path_lh)
                 
+                if hippunfold_version == 2:
+                    # mid_lh.Points = mid_lh.Points[:, [1, 0, 2]]
+                    unf_lh.Points = unf_lh.Points[:, [1, 0, 2]]
+                    # Flip x axis of the left unfolded hippocampus
+                    
+
                 # Create right hemisphere by copying and mirroring left hemisphere
                 mid_rh = mid_lh.copy()
                 unf_rh = unf_lh.copy()
                 
-                # Flip left to right surface (mirror along X axis)
+                # Flip right to left surface (mirror along X axis)
                 mid_rh.Points[:, 0] *= -1
                 unf_rh.Points[:, 0] *= -1
                 
@@ -1143,6 +1186,10 @@ def _load_surfaces_hip(
         mid_rh = read_surface(pth_canonical)
         unf_rh = read_surface(pth_unfold)
         
+        if hippunfold_version == 2:
+            # mid_rh.Points = mid_rh.Points[:, [1, 0, 2]]
+            unf_rh.Points = unf_rh.Points[:, [1, 0, 2]]
+
         # Create left hemisphere by copying and mirroring right hemisphere
         mid_lh = mid_rh.copy()
         unf_lh = unf_rh.copy()
@@ -1295,7 +1342,7 @@ def _make_png_ctx(
         cmap=cmap,
         color_bar=color_bar,
         color_range=color_range,
-        transparent_bg=False,
+        transparent_bg=True,
         nan_color=(211, 211, 211, 1),
         embed_nb=True,
         interactive=False,
@@ -1437,11 +1484,14 @@ def _make_png_sctx(
             filename=out_png,
         )
 
+    # Convert to base64
+    src = _get_b64_src(out_png)
+
     return (
         f'<p style="text-align:center;margin-left=0px;"> '
-        f'<a href="{out_png}" target="_blank">'
-        f'<img style="height:150px;margin-top:-100px;" src="{out_png}"> '
-        f"</a> "
+        # f'<a href="{out_png}" target="_blank">'
+        f'<img style="height:150px;margin-top:-100px;" src="{src}"> '
+        # f"</a> "
         f"</p>"
     )
 
@@ -1458,19 +1508,30 @@ def _make_png_hip(
     color_bar="bottom",
     subject_dir=None,
     participant_id=None,
-    session_id=None
+    session_id=None,
+    hippunfold_version=1
 ):
 
     lat_lh, mid_lh, unf_lh, unf_rh, mid_rh, lat_rh = _load_surfaces_hip(res=res,    
                                                                         subject_dir=subject_dir,
                                                                         participant_id=participant_id,
-                                                                        session_id=session_id)
+                                                                        session_id=session_id,
+                                                                        hippunfold_version=hippunfold_version)
+    
+
+    if hippunfold_version == 2:
+        data_unf_lh = data_lh.reshape(128, 64).T.flatten()
+        data_unf_rh = data_rh.reshape(128, 64).T.flatten()
+    else:
+        data_unf_lh = data_lh
+        data_unf_rh = data_rh
+
     if analysis == "asymmetry":
         kwds = dict()
         kwds["text__textproperty"] = {"fontSize": 50}
         plot_surfs(
             surfaces=[lat_lh, mid_lh, unf_lh],
-            values=[data_lh, data_lh, data_lh],
+            values=[data_lh, data_lh, data_unf_lh],
             views=["dorsal", "dorsal", "lateral"],
             color_bar=color_bar,
             zoom=1.75,
@@ -1479,12 +1540,13 @@ def _make_png_hip(
             interactive=False,
             screenshot=True,
             filename=out_png,
+            transparent_bg=True,
         )
 
     else:
         plot_surfs(
             surfaces=[lat_lh, mid_lh, unf_lh, unf_rh, mid_rh, lat_rh],
-            values=[data_lh, data_lh, data_lh, data_rh, data_rh, data_rh],
+            values=[data_lh, data_lh, data_unf_lh, data_unf_rh, data_rh, data_rh],
             views=["dorsal", "dorsal", "lateral", "lateral", "dorsal", "dorsal"],
             color_bar=color_bar,
             zoom=1.75,
@@ -1493,13 +1555,17 @@ def _make_png_hip(
             interactive=False,
             screenshot=True,
             filename=out_png,
+            transparent_bg=True,
         )
+
+    # Convert to base64
+    src = _get_b64_src(out_png)
 
     return (
         f'<p style="text-align:center;margin-left=0px;"> '
-        f'<a href="{out_png}" target="_blank">'
-        f'<img style="height:175px;margin-top:-100px;" src="{out_png}"> '
-        f"</a> "
+        # f'<a href="{out_png}" target="_blank">'
+        f'<img style="height:175px;margin-top:-100px;" src="{src}"> '
+        # f"</a> "
         f"</p>"
     )
 
@@ -1519,7 +1585,8 @@ def make_png(
     participant_id=None,
     session_id=None,
     env=None,
-    tmp_dir=None
+    tmp_dir=None,
+    hippunfold_version=1
 ):
 
     if struct == "cortex":
@@ -1552,6 +1619,7 @@ def make_png(
             subject_dir=subject_dir,
             participant_id=participant_id,
             session_id=session_id,
+            hippunfold_version=hippunfold_version,
         )
 
     return _make_png_sctx(
@@ -1594,6 +1662,7 @@ def report_struct(
     feature_means=None,
     subject_dir=None,
     env=None,
+    hippunfold_version=1,
 ):
     """
     Generate report section for a specific brain structure adapted for zbdataset structure.
@@ -1754,7 +1823,8 @@ def report_struct(
             participant_id=sid,
             session_id=ses,
             env=env,
-            tmp_dir=tmp_dir
+            tmp_dir=tmp_dir,
+            hippunfold_version=hippunfold_version,
         )
         
         html += png_block
@@ -1805,6 +1875,7 @@ def generate_clinical_report(
     verbose=True,
     control_data=None,
     valid_subjects=None,
+    hippunfold_version=1,
 ):
     """Zbrains: Clinical report generator adapted for zbdataset
 
@@ -1859,7 +1930,12 @@ def generate_clinical_report(
     tag:
         Tag for the output filename
     verbose:
-        Verbose output
+        Verbose output    control_data:
+        Control database information for statistics and plots.
+    valid_subjects:
+        Dictionary of valid subjects and their features for table generation.
+    hippunfold_version:
+        Version of the hippocampal unfold procedure (1 or 2).
 
     Returns
     -------
@@ -1899,15 +1975,16 @@ def generate_clinical_report(
         subses_files.extend([os.path.join(root, f) for f in files])
     
     # If ANALYSIS is empty run all available analysis
+   
     if analyses is None:
         available_analyses = sorted(
             list(
                 set(
-                    [
-                        os.path.basename(file).split(".")[0].split("analysis-")[1].split("_")[0]
-                        for file in subses_files
-                        if "analysis-" in os.path.basename(file)
-                    ]
+                                   [
+                    os.path.basename(file).split(".")[0].split("analysis-")[1].split("_")[0]
+                    for file in subses_files
+                    if "analysis-" in os.path.basename(file)
+                ]
                 )
             )
         )
@@ -1969,7 +2046,7 @@ def generate_clinical_report(
             # If no zbrains_path provided, just note what features will be in the report
             feature_list = ", ".join(features)
             report += f"""
-            <p style="font-family:gill sans,sans-serif;text-align:center;">
+            <p style="font-family:gill sans, sans-serif; text-align:center;">
             The following features will be analyzed: {feature_list}
             </p>
             """
@@ -1980,7 +2057,7 @@ def generate_clinical_report(
             report += controls_summary_html(control_data, subject_age=age)
         else:
             report += """
-            <p style="font-family:gill sans,sans-serif;text-align:center;">
+            <p style="font-family:gill sans, sans-serif; text-align:center;">
             No control database information available.
             </p>
             """
@@ -2088,6 +2165,7 @@ def generate_clinical_report(
                     color_bar=color_bar,
                     tmp_dir=tmp_dir,
                     subject_dir=subject_dir,
+                    hippunfold_version=hippunfold_version,
                 )
                 
                 # Generate cortical report section
@@ -2135,11 +2213,17 @@ def generate_clinical_report(
         else:
             file_pdf = os.path.join(subject_dir, f"{bids_id}_approach-{approach}_summary-report.pdf")
         
+        # Save raw HTML output
+        file_html = file_pdf.replace(".pdf", ".html")
+        with open(file_html, "w", encoding="utf-8") as f:
+            f.write(report)
+
         # Convert HTML to PDF
         convert_html_to_pdf(report, file_pdf)
         
         if verbose:
             logger.info(f"Clinical report successfully created: {file_pdf}")
+            logger.info(f"HTML report successfully created: {file_html}")
         
         return os.path.realpath(file_pdf)
         

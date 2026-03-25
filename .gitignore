@@ -35,3 +35,6 @@ ENV/
 *.swp
 *.swo
 judy_test.py
+/zbrains_output/
+surf-fsnative_label-white.surf.gii
+temp_parc_copy.nii.gz

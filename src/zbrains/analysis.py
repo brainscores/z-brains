@@ -712,7 +712,9 @@ def analyze_dataset(dataset, reference, method='zscore', output_directory=None, 
         "adc": {"output": "ADC"},
         "fa": {"output": "FA"},
         "qt1": {"output": "qT1"},  # Changed from "T1map" to "qT1"
-        "fmri": {"output": "fMRI"}
+        "fmri": {"output": "fMRI"},
+        "t1w": {"output": "T1w"},
+        "sa": {"output": "SA"}
     }
     
     # Define analysis parameters

@@ -6,6 +6,10 @@ Z-Brains is a Python toolkit for analysing structural and diffusion MRI data, bu
 
 ---
 
+## Current z-brains directory for MICA Lab:
+
+"/host/verges/tank/data/BIDS_MICs/derivatives/zbrains_2.0/"
+
 ## Install
 
 ```bash
@@ -97,6 +101,7 @@ Blur processing additionally needs:
 | `FA` | `maps/{pid}_{sid}_hemi-{hemi}_surf-fsLR-32k_label-{midthickness,white}_FA.func.gii`, `maps/{pid}_{sid}_space-nativepro_model-DTI_map-FA.nii.gz`. |
 | `ADC` | `maps/{pid}_{sid}_hemi-{hemi}_surf-fsLR-32k_label-{midthickness,white}_ADC.func.gii`, `maps/{pid}_{sid}_space-nativepro_model-DTI_map-ADC.nii.gz`. |
 | `thickness` | `maps/{pid}_{sid}_hemi-{hemi}_surf-fsLR-32k_label-thickness.func.gii`. |
+| `SA` | `surf/{pid}_{sid}_hemi-{L,R}_space-nativepro_surf-fsnative_label-{midthickness,white}.surf.gii`. |
 | `FLAIR` | `maps/{pid}_{sid}_hemi-{hemi}_surf-fsLR-32k_label-{midthickness,white}_flair.func.gii`, `maps/{pid}_{sid}_space-nativepro_map-flair.nii.gz`. |
 | `qT1` | `maps/{pid}_{sid}_hemi-{hemi}_surf-fsLR-32k_label-{midthickness,white}_T1map.func.gii`, `maps/{pid}_{sid}_space-nativepro_map-T1map.nii.gz`. |
 | `FLAIR*blur` | Same FLAIR volumetric/surface files above; blur outputs stored as `maps/cortex/{pid}_{sid}_hemi-{hemi}_feature-FLAIR*blur_*`. |

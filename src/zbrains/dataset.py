@@ -143,7 +143,7 @@ class demographics():
                     
                     elif dtype.lower() == 'binary':
                         # Check if we should use reference encoding
-                        if single_subject and self.reference is not None and hasattr(self.reference, 'binary_encodings') and col in self.reference.binary_encodings:
+                        if self.reference is not None and hasattr(self.reference, 'binary_encodings') and col in self.reference.binary_encodings:
                             # Get encoding from reference
                             ref_value_to_binary = self.reference.binary_encodings[col]
                             
@@ -154,14 +154,18 @@ class demographics():
                             print(f"Applied reference encoding for binary column '{col}'")
                             
                         else:
-                            # Check if the column has exactly 2 unique values
+                            # Check if the column has valid binary values (1 or 2 unique values)
                             unique_values = self.data[col].astype(str).str.lower().unique()
-                            if len(unique_values) != 2:
-                                raise ValueError(f"Column '{col}' has {len(unique_values)} unique values, expected exactly 2 for binary data type")
+                            # Sort to ensure deterministic encoding (0 for first alphabetical, 1 for second)
+                            unique_values.sort()
                             
-                            # Convert to numeric binary values (0/1) - arbitrary but consistent mapping
-                            first_value = unique_values[0]
-                            value_to_binary = {val.lower(): 1 if val.lower() == first_value.lower() else 0 for val in unique_values}
+                            if len(unique_values) > 2:
+                                raise ValueError(f"Column '{col}' has {len(unique_values)} unique values, expected 1 or 2 for binary data type")
+                            
+                            # Convert to numeric binary values (0/1)
+                            # Using sorted values: 1st alphabetical -> 0, 2nd -> 1
+                            # This handles len=1 (val -> 0) and len=2 (val1->0, val2->1)
+                            value_to_binary = {val: i for i, val in enumerate(unique_values)}
                             
                             # Store the encoding for future reference
                             self.binary_encodings[col] = value_to_binary
@@ -342,11 +346,14 @@ class zbdataset():
             "fa": "FA",
             "adc": "ADC", 
             "thickness": "thickness",
+            "sa": "SA",
             "flair": "FLAIR",
             "qt1": "qT1",
             "qt1*blur": "qT1*blur",
             "flair*blur": "FLAIR*blur",
             "fmri": "fMRI",
+            "t1w": "T1w",
+            "t1w*blur": "T1w*blur",
         }
         
         # Normalize all features to consistent case
@@ -381,11 +388,15 @@ class zbdataset():
                       "maps/{participant_id}_{session_id}_space-nativepro_map-flair.nii.gz"],
             "qT1": ["maps/{participant_id}_{session_id}_hemi-{hemi}_surf-fsLR-32k_label-{surfacetype}_T1map.func.gii", 
                     "maps/{participant_id}_{session_id}_space-nativepro_map-T1map.nii.gz"],
-            "FLAIR*blur": ["maps/{participant_id}_{session_id}_hemi-{hemi}_surf-fsLR-32k_label-{surfacetype}_flair.func.gii",
-                           "maps/{participant_id}_{session_id}_space-nativepro_map-flair.nii.gz"],
-            "qT1*blur": ["maps/{participant_id}_{session_id}_hemi-{hemi}_surf-fsLR-32k_label-{surfacetype}_T1map.func.gii",
-                         "maps/{participant_id}_{session_id}_space-nativepro_map-T1map.nii.gz"],
-            "fMRI": ["func/desc-se_task-rest_acq-AP_bold/surf/{participant_id}_{session_id}_surf-fsLR-32k_desc-timeseries_clean.shape.gii"]
+            
+            # Fix: Remove surface file requirement for blur features (inputs only)
+            "FLAIR*blur": ["maps/{participant_id}_{session_id}_space-nativepro_map-flair.nii.gz"],
+            "qT1*blur": ["maps/{participant_id}_{session_id}_space-nativepro_map-T1map.nii.gz"],
+            
+            "fMRI": ["func/desc-se_task-rest_acq-AP_bold/surf/{participant_id}_{session_id}_surf-fsLR-32k_desc-timeseries_clean.shape.gii"],
+            "SA": ["surf/{participant_id}_{session_id}_hemi-{hemi}_space-nativepro_surf-fsnative_label-{surfacetype}.surf.gii"],
+            "T1w": ["anat/{participant_id}_{session_id}_space-nativepro_T1w.nii.gz"],
+            "T1w*blur": ["anat/{participant_id}_{session_id}_space-nativepro_T1w.nii.gz"],
         }
         
         # Rest of the method remains the same...
@@ -623,8 +634,8 @@ class zbdataset():
                         # Blur features and fMRI don't apply to hippocampus
                         self.valid_subjects[feature]['structures']['hippocampus'].append(subject)
                     
-                    if feature_has_subcortical and not feature.lower().endswith('*blur') and feature.lower() != 'fmri':
-                        # Blur features and fMRI don't apply to subcortical
+                    if feature_has_subcortical and not feature.lower().endswith('*blur') and feature.lower() != 'fmri' and feature.lower() != 'sa':
+                        # Blur features, fMRI, and SA don't apply to subcortical
                         self.valid_subjects[feature]['structures']['subcortical'].append(subject)
                 else:
                     subject_missing_features.add(feature)
@@ -662,31 +673,33 @@ class zbdataset():
         # Always print feature availability summary
         print("\nFeature availability summary:")
         total_subjects = len(self.valid_subjects['base'])
+        denom = total_subjects if total_subjects > 0 else 1
+
         for feature in self.features:
             if feature in feature_availability:
                 avail_count = feature_availability[feature]
-                print(f"  {feature}: {avail_count}/{total_subjects} subjects ({avail_count/total_subjects*100:.1f}%)")
+                print(f"  {feature}: {avail_count}/{total_subjects} subjects ({(avail_count/denom)*100:.1f}%)")
                 
                 # Print structure-specific availability for this feature
                 if verbose:
                     cortex_count = len(self.valid_subjects[feature]['structures']['cortex'])
-                    print(f"    - cortex: {cortex_count}/{total_subjects} subjects ({cortex_count/total_subjects*100:.1f}%)")
+                    print(f"    - cortex: {cortex_count}/{total_subjects} subjects ({(cortex_count/denom)*100:.1f}%)")
                     
                     if self.hippocampus and not feature.lower().endswith('*blur') and feature.lower() != 'fmri':
                         hippo_count = len(self.valid_subjects[feature]['structures']['hippocampus'])
-                        print(f"    - hippocampus: {hippo_count}/{total_subjects} subjects ({hippo_count/total_subjects*100:.1f}%)")
+                        print(f"    - hippocampus: {hippo_count}/{total_subjects} subjects ({(hippo_count/denom)*100:.1f}%)")
                     
-                    if self.subcortical and not feature.lower().endswith('*blur') and feature.lower() != 'fmri':
+                    if self.subcortical and not feature.lower().endswith('*blur') and feature.lower() != 'fmri' and feature.lower() != 'sa':
                         subcort_count = len(self.valid_subjects[feature]['structures']['subcortical'])
-                        print(f"    - subcortical: {subcort_count}/{total_subjects} subjects ({subcort_count/total_subjects*100:.1f}%)")
+                        print(f"    - subcortical: {subcort_count}/{total_subjects} subjects ({(subcort_count/denom)*100:.1f}%)")
         
         # Print structure availability summary
         print("\nStructure availability summary:")
-        print(f"  cortex: {len(self.valid_subjects['structures']['cortex'])}/{total_subjects} subjects ({len(self.valid_subjects['structures']['cortex'])/total_subjects*100:.1f}%)")
+        print(f"  cortex: {len(self.valid_subjects['structures']['cortex'])}/{total_subjects} subjects ({(len(self.valid_subjects['structures']['cortex'])/denom)*100:.1f}%)")
         if self.hippocampus:
-            print(f"  hippocampus: {len(self.valid_subjects['structures']['hippocampus'])}/{total_subjects} subjects ({len(self.valid_subjects['structures']['hippocampus'])/total_subjects*100:.1f}%)")
+            print(f"  hippocampus: {len(self.valid_subjects['structures']['hippocampus'])}/{total_subjects} subjects ({(len(self.valid_subjects['structures']['hippocampus'])/denom)*100:.1f}%)")
         if self.subcortical:
-            print(f"  subcortical: {len(self.valid_subjects['structures']['subcortical'])}/{total_subjects} subjects ({len(self.valid_subjects['structures']['subcortical'])/total_subjects*100:.1f}%)")
+            print(f"  subcortical: {len(self.valid_subjects['structures']['subcortical'])}/{total_subjects} subjects ({(len(self.valid_subjects['structures']['subcortical'])/denom)*100:.1f}%)")
         
         # Only print detailed missing features if verbose
         if verbose and missing_features:
@@ -729,11 +742,14 @@ class zbdataset():
             "fa": "FA",
             "adc": "ADC",
             "thickness": "thickness",
+            "sa": "SA",
             "flair": "FLAIR",
             "qt1": "qT1",
             "flair*blur": "FLAIR*blur",
             "qt1*blur": "qT1*blur",
             "fmri": "fMRI",
+            "t1w": "T1w",
+            "t1w*blur": "T1w*blur",
         }
         
         # Normalize features consistently
@@ -830,9 +846,11 @@ class zbdataset():
                     if blur_features:
                         # Check which base features are available for this subject
                         available_features = []
-                        for feature in base_features:
-                            if subject in self.valid_subjects[feature]['all']:
-                                available_features.append(feature)
+                        # Iterate the ORIGINAL blur features to check validity
+                        for blur_feature in blur_features:
+                            if subject in self.valid_subjects[blur_feature]['all']:
+                                # Append the base feature name to available_features for processing
+                                available_features.append(blur_feature.replace("*blur", ""))
                         
                         if available_features:  # If ANY features are available, proceed with blurring
                             if verbose:
@@ -1022,12 +1040,15 @@ class zbdataset():
             "fa": "FA",
             "adc": "ADC",
             "thickness": "thickness",
+            "sa": "SA",
             "flair": "FLAIR",
             "qt1": "qT1",
             "t1map": "qT1",
             "flair*blur": "FLAIR*blur",
             "qt1*blur": "qT1*blur",
             "fmri": "fMRI",
+            "t1w": "T1w",
+            "t1w*blur": "T1w*blur",
         }
 
         if features is None:
@@ -1063,12 +1084,14 @@ class zbdataset():
 
         feature_output_mapping = {
             "thickness": "thickness",
+            "sa": "SA",
             "flair": "FLAIR",
             "adc": "ADC",
             "fa": "FA",
             "qt1": "qT1",
             "t1map": "qT1",
-            "fmri": "fMRI"
+            "fmri": "fMRI",
+            "t1w": "T1w",
         }
 
         feature_meta = []
@@ -1085,6 +1108,8 @@ class zbdataset():
                     blur_token = "FLAIR"
                 elif base_lower in {"adc", "fa"}:
                     blur_token = base_lower
+                elif base_lower == "t1w":
+                    blur_token = "T1w"
                 else:
                     blur_token = feat[:-5]
             else:
@@ -1112,7 +1137,7 @@ class zbdataset():
                     self.hippocampus and self.hippunfold_directory and not is_blur and hippo_token is not None and base_lower != 'fmri'
                 ),
                 "requires_subcortical": (
-                    self.subcortical and self.freesurfer_directory and not is_blur and subcortical_token is not None and base_lower != 'fmri'
+                    self.subcortical and self.freesurfer_directory and not is_blur and subcortical_token is not None and base_lower != 'fmri' and base_lower != 'sa'
                 )
             })
 
@@ -1281,13 +1306,17 @@ class zbdataset():
                             subject_missing_features.add(feature_name)
 
             if self.subcortical and self.freesurfer_directory:
-                volume_file = os.path.join(subcortical_dir, f"{bids_id}_feature-volume.csv")
-                all_files_count += 1
-                if not os.path.exists(volume_file):
-                    subject_missing.append(volume_file)
-                    missing_files_count += 1
-                    if subject_structures['subcortical'] is not None:
-                        subject_structures['subcortical'] = False
+                # Only check for volume file if thickness or volume is requested as a feature
+                check_volume = any(feat.lower() in ['thickness', 'volume'] for feat in self.features)
+                
+                if check_volume:
+                    volume_file = os.path.join(subcortical_dir, f"{bids_id}_feature-volume.csv")
+                    all_files_count += 1
+                    if not os.path.exists(volume_file):
+                        subject_missing.append(volume_file)
+                        missing_files_count += 1
+                        if subject_structures['subcortical'] is not None:
+                            subject_structures['subcortical'] = False
 
                 for meta in feature_meta:
                     if not meta['requires_subcortical']:
@@ -1428,7 +1457,7 @@ class zbdataset():
         output_directory : str
             Directory where processed data should be stored
         only_demographics_subjects : bool, default=True
-            If True, only check directories for subjects in the demographics data
+            If True, only check directories for subjects in the demographics
         verbose : bool, default=True
             If True, prints detailed information about the directories
 
@@ -1561,6 +1590,7 @@ class zbdataset():
         --------
         dict
             Dictionary containing analysis results for each feature and region
+
         """
         
         # Call the analysis function and store results
@@ -1623,12 +1653,15 @@ class zbdataset():
         feature_mapping = {
             "thickness": "thickness",
             "flair": "FLAIR",
+            "sa": "SA",
             "adc": "ADC",
             "fa": "FA",
             "qt1": "qT1",
             "qt1*blur": "qT1*blur",
             "flair*blur": "FLAIR*blur",
             "fmri": "fMRI",
+            "t1w": "T1w",
+            "t1w*blur": "T1w*blur",
         }
 
         features = [feature_mapping.get(f.lower(), f) for f in features]
@@ -1735,6 +1768,7 @@ class zbdataset():
                     verbose=verbose,
                     control_data=self.reference_demographics,
                     valid_subjects=self.valid_subjects,
+                    hippunfold_version=self.hippunfold_version,
                 )
                 
                 generated_reports.append(report_path)
