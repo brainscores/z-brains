@@ -179,19 +179,42 @@ def apply_blurring(participant_id, session_id, features, output_directory, workb
         # Get FreeSurfer parcellation path (using .mgz directly)
         aparc_path = os.path.join(freesurfer_path, "mri", "aparc+aseg.mgz")
         
-        # Transform FreeSurfer parcellation to native space if needed (done once per hemisphere)
-        if not os.path.exists(temp_parc_path):
-            # Pass the MGZ file directly to fixmatrix
-            fixmatrix(
-                path=input_dir,
-                BIDS_ID=f"{participant_id}_{session_id}",
-                temppath=tmp_dir,
-                wb_path=workbench_path,
-                inputmap=aparc_path,
-                outputmap=temp_parc_path,
-                basemap=os.path.join(input_dir, "anat", f"{participant_id}_{session_id}_space-nativepro_T1w_brain.nii.gz"),
-                mat_path="from-fsnative_to_nativepro_T1w_0GenericAffine"
-            )
+        # Check dependency explicitly
+        if not os.path.exists(aparc_path):
+            print(f"      Error: Missing dependency {aparc_path}. Skipping {hemi}.")
+            continue
+        
+        # Check if we need to generate Laplace solution and shifted surfaces
+        # Must check BOTH Laplace file AND all shifted surfaces exist
+        needs_generation = False
+        
+        if not os.path.exists(output_path):
+            needs_generation = True
+        else:
+            # Check if all shifted surfaces exist
+            for surf_dist in [1.0, 2.0]:
+                swm_surf = os.path.join(struct_dir, f"{participant_id}_{session_id}_hemi-{hemi}_sfwm-{surf_dist}mm.surf.gii")
+                # Also check if file is empty (size 0) just in case
+                if not os.path.exists(swm_surf) or os.path.getsize(swm_surf) == 0:
+                    needs_generation = True
+                    break
+        
+        # Generate Laplace and surfaces if needed
+        if needs_generation:
+            # Transform FreeSurfer parcellation to native space if needed
+            if not os.path.exists(temp_parc_path):
+                # Pass the MGZ file directly to fixmatrix
+                fixmatrix(
+                    path=input_dir,
+                    BIDS_ID=f"{participant_id}_{session_id}",
+                    temppath=tmp_dir,
+                    wb_path=workbench_path,
+                    inputmap=aparc_path,
+                    outputmap=temp_parc_path,
+                    basemap=os.path.join(input_dir, "anat", f"{participant_id}_{session_id}_space-nativepro_T1w_brain.nii.gz"),
+                    mat_path="from-fsnative_to_nativepro_T1w_0GenericAffine"
+                )
+            
             import shutil
             # Solve Laplace equation
             shutil.copy(src=temp_parc_path, dst="temp_parc_copy.nii.gz")  # Backup for laplace solver
@@ -202,10 +225,11 @@ def apply_blurring(participant_id, session_id, features, output_directory, workb
             surface_generator.shift_surface(
                 os.path.join(input_dir, "surf", f"{participant_id}_{session_id}_hemi-{hemi}_space-nativepro_surf-fsnative_label-white.surf.gii"),
                 output_path,
-                os.path.join(struct_dir, f"{participant_id}_{session_id}_{hemi}_sfwm-"),
+                os.path.join(struct_dir, f"{participant_id}_{session_id}_hemi-{hemi}_sfwm-"),
                 [1.0, 2.0]
             )
             shutil.copy(src=os.path.join(input_dir, "surf", f"{participant_id}_{session_id}_hemi-{hemi}_space-nativepro_surf-fsnative_label-white.surf.gii"), dst="surf-fsnative_label-white.surf.gii") 
+        
         # Process each feature
         for feature in features:
             if verbose:
@@ -215,25 +239,32 @@ def apply_blurring(participant_id, session_id, features, output_directory, workb
             feature_lower = feature.lower()
             
             # Set up volume map path based on feature type
-            if feature_lower == "t1map" or feature_lower == "qt1":
+            if feature.lower() == "thickness":
+                output_feat = "thickness"
+            elif feature.lower() == "sa":
+                output_feat = "SA"
+            elif feature.lower() == "t1map" or feature_lower == "qt1":
                 volumemap = os.path.join(input_dir, "maps", f"{participant_id}_{session_id}_space-nativepro_map-T1map.nii.gz")
-                feature_name = "qT1"
+                output_feat = "qT1"
             elif feature_lower == "flair":
                 volumemap = os.path.join(input_dir, "maps", f"{participant_id}_{session_id}_space-nativepro_map-flair.nii.gz")
-                feature_name = "FLAIR"
+                output_feat = "FLAIR"
             elif feature_lower in ["adc", "fa"]:
                 volumemap = os.path.join(input_dir, "maps", f"{participant_id}_{session_id}_space-nativepro_model-DTI_map-{feature_lower}.nii.gz")
-                feature_name = feature_lower
+                output_feat = feature_lower
+            elif feature_lower == "t1w":
+                volumemap = os.path.join(input_dir, "anat", f"{participant_id}_{session_id}_space-nativepro_T1w.nii.gz")
+                output_feat = "T1w"
             else:
                 volumemap = os.path.join(input_dir, "maps", f"{participant_id}_{session_id}_space-nativepro_map-{feature_lower}.nii.gz")
-                feature_name = feature_lower
-            
+                output_feat = feature_lower
+        
             # Skip if the volume map doesn't exist
             if not os.path.exists(volumemap):
                 if verbose:
                     print(f"      Warning: Volume map not found for feature {feature}, skipping")
                 continue
-            
+                
             # Define temporary file paths
             midthickness_surf = os.path.join(input_dir, "surf", f"{participant_id}_{session_id}_hemi-{hemi}_space-nativepro_surf-fsnative_label-midthickness.surf.gii")
             midthickness_func = os.path.join(tmp_dir, f"{participant_id}_{session_id}_hemi-{hemi}_{feature}_midthickness.func.gii")
@@ -260,39 +291,39 @@ def apply_blurring(participant_id, session_id, features, output_directory, workb
             ])
             
             # Load surface data one at a time to minimize memory usage
-            pial_data = nib.load(midthickness_func).darrays[0].data.astype(np.float32)
-            pial_surface = nib.load(midthickness_surf).darrays[0].data.astype(np.float32)
+            midthickness_data = nib.load(midthickness_func).darrays[0].data.astype(np.float32)
+            midthickness_surface = nib.load(midthickness_surf).darrays[0].data.astype(np.float32)
             white_data = nib.load(white_func).darrays[0].data.astype(np.float32)
             white_surface = nib.load(white_surf).darrays[0].data.astype(np.float32)
             
             # Get number of vertices
-            num_vertices = len(pial_data)
+            num_vertices = len(midthickness_data)
             
             # Initialize arrays with minimal memory footprint
             surface_data = np.zeros((num_vertices, 4), dtype=np.float32)  # pial, white, 1mm, 2mm
-            surface_data[:, 0] = pial_data
+            surface_data[:, 0] = midthickness_data
             surface_data[:, 1] = white_data
             
             # Clean up after loading initial surfaces
-            del pial_data, white_data
+            del midthickness_data, white_data
             gc.collect()
             
             # Initialize arrays for distances and gradients
             distances = np.zeros((num_vertices, 3), dtype=np.float32)  # pial-white, white-1mm, 1mm-2mm
             gradients = np.zeros((num_vertices, 3), dtype=np.float32)
-            
-            # Calculate pial-white distance and gradient
-            dist_pial_white = np.sqrt(np.sum((pial_surface - white_surface)**2, axis=1)).astype(np.float32)
-            distances[:, 0] = dist_pial_white
-            
+
+            # Calculate midthickness-white distance and gradient
+            dist_midthickness_white = np.sqrt(np.sum((midthickness_surface - white_surface)**2, axis=1)).astype(np.float32)
+            distances[:, 0] = dist_midthickness_white
+
             # Calculate gradient with safe division
             with np.errstate(divide='ignore', invalid='ignore'):
-                gradient = np.where(dist_pial_white > 0, 
-                                   (surface_data[:, 1] - surface_data[:, 0]) / dist_pial_white, 0).astype(np.float32)
+                gradient = np.where(dist_midthickness_white > 0,
+                                   (surface_data[:, 1] - surface_data[:, 0]) / dist_midthickness_white, 0).astype(np.float32)
             gradients[:, 0] = gradient
-            
-            # Clean up after pial-white processing
-            del gradient, dist_pial_white
+            # Outer surf - inner surf
+            # Clean up after midthickness-white processing
+            del gradient, dist_midthickness_white
             gc.collect()
             
             # Process shifted surfaces one at a time
@@ -301,8 +332,8 @@ def apply_blurring(participant_id, session_id, features, output_directory, workb
             
             for i, surf_dist in enumerate([1.0, 2.0]):
                 # Define shifted surface paths
-                swm_surf = os.path.join(struct_dir, f"{participant_id}_{session_id}_{hemi}_sfwm-{surf_dist}mm.surf.gii")
-                swm_func = os.path.join(tmp_dir, f"{participant_id}_{session_id}_{hemi}_{feature}_sfwm-{surf_dist}mm.func.gii")
+                swm_surf = os.path.join(struct_dir, f"{participant_id}_{session_id}_hemi-{hemi}_sfwm-{surf_dist}mm.surf.gii")
+                swm_func = os.path.join(tmp_dir, f"{participant_id}_{session_id}_hemi-{hemi}_{feature}_sfwm-{surf_dist}mm.func.gii")
                 
                 # Map volume to shifted surface
                 subprocess.run([
@@ -339,7 +370,7 @@ def apply_blurring(participant_id, session_id, features, output_directory, workb
                 gc.collect()
             
             # Clean up remaining variables
-            del pial_surface, white_surface, prev_surface, prev_data
+            del midthickness_surface, white_surface, prev_surface, prev_data
             gc.collect()
             
             # Reshape distances using utility function
@@ -347,13 +378,13 @@ def apply_blurring(participant_id, session_id, features, output_directory, workb
             
             # Define output paths
             raw_data_path = os.path.join(swm_dir, 
-                f"{participant_id}_{session_id}_hemi-{hemi}_feature-{feature_name}*blur_surf-fsnative_desc-raw.func.gii")
+                f"{participant_id}_{session_id}_hemi-{hemi}_feature-{output_feat}*blur_surf-fsnative_desc-raw.func.gii")
             dist_file_path = os.path.join(swm_dir, 
-                f"{participant_id}_{session_id}_hemi-{hemi}_feature-{feature_name}*blur_surf-fsnative_desc-dist.func.gii")
+                f"{participant_id}_{session_id}_hemi-{hemi}_feature-{output_feat}*blur_surf-fsnative_desc-dist.func.gii")
             grad_file_path = os.path.join(swm_dir, 
-                f"{participant_id}_{session_id}_hemi-{hemi}_feature-{feature_name}*blur_surf-fsnative_desc-grad.func.gii")
+                f"{participant_id}_{session_id}_hemi-{hemi}_feature-{output_feat}*blur_surf-fsnative_desc-grad.func.gii")
             smoothed_data_path = os.path.join(swm_dir, 
-                f"{participant_id}_{session_id}_hemi-{hemi}_feature-{feature_name}*blur_surf-fsnative_smooth-{smoothing_fwhm}mm.func.gii")
+                f"{participant_id}_{session_id}_hemi-{hemi}_feature-{output_feat}*blur_surf-fsnative_smooth-{smoothing_fwhm}mm.func.gii")
             
             # Save surface data and clean up immediately
             data_array = nib.gifti.gifti.GiftiDataArray(
@@ -500,15 +531,20 @@ def apply_hippocampal_processing(
         # Set up volume map path based on feature type
         if feature.lower() == "thickness":
             output_feat = "thickness"
+        elif feature.lower() == "sa":
+            output_feat = "SA"
         elif feature.lower() == "t1map" or feature.lower() == "qt1":
             volumemap = os.path.join(input_dir, "maps", f"{participant_id}_{session_id}_space-nativepro_map-T1map.nii.gz")
-            output_feat = "qT1"  # Changed from "T1map" to "qT1"
+            output_feat = "qT1"
         elif feature.lower() in ["adc", "fa"]:
             volumemap = os.path.join(input_dir, "maps", f"{participant_id}_{session_id}_space-nativepro_model-DTI_map-{feature.upper()}.nii.gz")
             output_feat = feature.upper()
         elif feature.lower() == "flair":
             volumemap = os.path.join(input_dir, "maps", f"{participant_id}_{session_id}_space-nativepro_map-flair.nii.gz")
             output_feat = "FLAIR"
+        elif feature.lower() == "t1w":
+            volumemap = os.path.join(input_dir, "anat", f"{participant_id}_{session_id}_space-nativepro_T1w.nii.gz")
+            output_feat = "T1w"
         else:
             volumemap = os.path.join(input_dir, "maps", f"{participant_id}_{session_id}_space-nativepro_map-{feature.lower()}.nii.gz")
             output_feat = feature.lower()
@@ -519,6 +555,8 @@ def apply_hippocampal_processing(
                 if verbose:
                     print(f"    Warning: Volume map not found for feature {feature}: {intermediate_file}")
                 continue
+        elif output_feat == "SA":
+            pass # SA calculation uses surfaces only
         elif not os.path.exists(volumemap):
             if verbose:
                 print(f"    Warning: Volume map not found for feature {feature}: {volumemap}")
@@ -571,7 +609,15 @@ def apply_hippocampal_processing(
                 hippocampus_dir,
                 f"{participant_id}_{session_id}_hemi-{hemi}_den-{resolution}_label-hipp_midthickness_feature-{output_feat}_smooth-{smoothing_fwhm}mm.func.gii"
             )
-            if feature.lower() != "thickness":
+            if feature.lower() == "sa":
+                # Compute surface area
+                subprocess.run([
+                    os.path.join(workbench_path, "wb_command"),
+                    "-surface-vertex-areas",
+                    surf_file,
+                    intermediate_file
+                ], check=False)
+            elif feature.lower() != "thickness":
                 # Map volume to surface
                 subprocess.run([
                     os.path.join(workbench_path, "wb_command"),
@@ -701,8 +747,7 @@ def apply_subcortical_processing(
             output_file = os.path.join(subcortical_dir, f"{bids_id}_feature-volume.csv")
             
             if verbose:
-                print(f"    Extracting volume data from FreeSurfer stats")
-                
+                print(f"    Extracting volume data from FreeSurfer")
             # Extract volumes from aseg.stats
             try:
                 # Read aseg.stats and extract volume data
@@ -747,6 +792,9 @@ def apply_subcortical_processing(
             elif feat_lower == "flair":
                 input_file = os.path.join(subject_micapipe_dir, "maps", f"{bids_id}_space-nativepro_map-flair.nii.gz")
                 output_feat = "FLAIR"
+            elif feat_lower == "t1w":
+                input_file = os.path.join(subject_micapipe_dir, "anat", f"{bids_id}_space-nativepro_T1w.nii.gz")
+                output_feat = "T1w"
             else:
                 input_file = os.path.join(subject_micapipe_dir, "maps", f"{bids_id}_space-nativepro_map-{feat_lower}.nii.gz")
                 output_feat = feat_lower
@@ -867,13 +915,16 @@ def apply_cortical_processing(
     # Map features to their file naming conventions
     feature_mapping = {
         "thickness": {"input": "thickness", "output": "thickness"},
+        "sa": {"input": "SA", "output": "SA"},
         "flair": {"input": "flair", "output": "FLAIR"},
         "adc": {"input": "ADC", "output": "ADC"},
         "fa": {"input": "FA", "output": "FA"},
-        "qt1": {"input": "T1map", "output": "qT1"},  # Changed output from "T1map" to "qT1"
-        "qt1*blur": {"input": "T1map", "output": "qT1*blur"},  # Added for consistency with blur features
-        "flair*blur": {"input": "flair", "output": "FLAIR*blur"},  # Added for consistency with blur features
-        "fmri": {"input": "fmri", "output": "fMRI"}  
+        "qt1": {"input": "T1map", "output": "qT1"},
+        "qt1*blur": {"input": "T1map", "output": "qT1*blur"},
+        "flair*blur": {"input": "flair", "output": "FLAIR*blur"},
+        "fmri": {"input": "fmri", "output": "fMRI"},
+        "t1w": {"input": "T1w", "output": "T1w"},
+        "t1w*blur": {"input": "T1w", "output": "T1w*blur"},
     }
     
     # Process each feature
@@ -998,6 +1049,83 @@ def apply_cortical_processing(
                             "-largest"
                         ], check=False)
                         
+                    elif feat_lower == "sa":
+                        # Surface Area - Calculate on fsLR directly, then smooth
+                        # Using fsLR surface (surf_file) instead of native surface
+                        
+                        # Temporary file for unsmoothed area
+                        fsLR_sa_unsmoothed = os.path.join(tmp_dir, f"{bids_id}_hemi-{hemi}_label-{label}_desc-sa_fsLR-{resolution}.func.gii")
+                        
+                        # 1. Calculate Area on fsLR surface
+                        subprocess.run([
+                            os.path.join(workbench_path, "wb_command"),
+                            "-surface-vertex-areas",
+                            surf_file,
+                            fsLR_sa_unsmoothed
+                        ], check=False)
+                        
+                        # 2. Apply smoothing
+                        subprocess.run([
+                            os.path.join(workbench_path, "wb_command"),
+                            "-metric-smoothing",
+                            surf_file,
+                            fsLR_sa_unsmoothed,
+                            str(cortical_smoothing),
+                            output_file
+                        ], check=False)
+
+                    elif feat_lower == "t1w":
+                        # T1w intensity (native T1 volume mapped to surface)
+                        volumemap = os.path.join(
+                            os.path.dirname(input_dir), 
+                            "anat", 
+                            f"{bids_id}_space-nativepro_T1w.nii.gz"
+                        )
+                        
+                        if not os.path.exists(volumemap):
+                            if verbose: print(f"      Warning: T1w volume not found: {volumemap}")
+                            continue
+
+                        native_surf = os.path.join(
+                            surf_dir, 
+                            f"{bids_id}_hemi-{hemi}_space-nativepro_surf-fsnative_label-{label}.surf.gii"
+                        )
+                        
+                        # Temp files
+                        native_func = os.path.join(tmp_dir, f"{bids_id}_hemi-{hemi}_label-{label}_desc-t1w_native.func.gii")
+                        fsLR_func_unsmoothed = os.path.join(tmp_dir, f"{bids_id}_hemi-{hemi}_label-{label}_desc-t1w_fsLR-{resolution}.func.gii")
+
+                        # 1. Map Volume to Native Surface
+                        subprocess.run([
+                            os.path.join(workbench_path, "wb_command"),
+                            "-volume-to-surface-mapping",
+                            volumemap,
+                            native_surf,
+                            native_func,
+                            "-trilinear"
+                        ], check=False)
+                        
+                        # 2. Resample to fsLR
+                        subprocess.run([
+                            os.path.join(workbench_path, "wb_command"),
+                            "-metric-resample",
+                            native_func,
+                            sphere_native,
+                            sphere_fsLR,
+                            "BARYCENTRIC",
+                            fsLR_func_unsmoothed,
+                        ], check=False)
+                        
+                        # 3. Apply Smoothing
+                        subprocess.run([
+                            os.path.join(workbench_path, "wb_command"),
+                            "-metric-smoothing",
+                            surf_file,
+                            fsLR_func_unsmoothed,
+                            str(cortical_smoothing),
+                            output_file
+                        ], check=False)
+
                     else:
                         # Regular feature processing (nonBlur)
                         # Define input file based on feature type
